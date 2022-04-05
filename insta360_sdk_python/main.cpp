@@ -8,16 +8,56 @@
 #include <camera/device_discovery.h>
 #include <boost/python.hpp>
 #include <boost/python/class.hpp>
-#include <boost/python/numpy/ndarray.hpp>
+#include <boost/python/numpy.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
+#include <boost/function.hpp>
 #include <regex>
 #include <vector>
+#include <list>
 #include <string>
 #include <memory>
+#include <tuple>
+#include <opencv2/opencv.hpp>
+#include <opencv2/video/video.hpp>
+#include <numeric>
+extern "C" {
+    #include <libavutil/imgutils.h>
+    #include <libavcodec/avcodec.h>
+    #include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+#include <libavutil/pixfmt.h>
+#include <stdio.h>
+}
 
+std::list<std::vector<uint8_t>> buffer;
+bool flag = false;
+int a(void* ptr, uint8_t* buf, int buf_size) {
+    if (buffer.size()<32||flag==false) {
+        //printf("aaa");
+        return AVERROR_EOF;
+    }
+    else {
+        int cur = 0;
+        for (auto b : buffer) {
+            std::vector<uint8_t> bufBuffer = b;
+            memcpy(buf+cur, bufBuffer.data(), bufBuffer.size() * sizeof(uint8_t));
+            cur += bufBuffer.size();
+            //printf("b%d\n", bufBuffer.size());
+        }
+        buffer.erase(buffer.begin(),std::next(buffer.begin(),1));
+        flag = false;
+        return cur;
+    }
+};
+static void avlog_cb(void*, int level, const char* szFmt, va_list varg) {
+
+}
+std::vector<uint8_t> vec;
 class TestStreamDelegate : public ins_camera::StreamDelegate {
 public:
+    boost::python::numpy::ndarray array_ = boost::python::numpy::zeros(boost::python::make_tuple((1,1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
     TestStreamDelegate() {
+        av_log_set_callback(avlog_cb);
         file1_ = fopen("./01.h264", "wb");
         file2_ = fopen("./02.h264", "wb");
     }
@@ -27,17 +67,37 @@ public:
     }
 
     void OnAudioData(const uint8_t* data, size_t size, int64_t timestamp) override {
-        std::cout << "on audio data:" << std::endl;
+        //std::cout << "on audio data:" << std::endl;
     }
+    int iii = 0;
     void OnVideoData(const uint8_t* data, size_t size, int64_t timestamp, uint8_t streamType, int stream_index = 0) override {
         //std::cout << "on video frame:" << size << ";" << timestamp << std::endl;
-        if (stream_index == 0) {
+        iii++;
+        std::vector<uint8_t> aaa(data, data + size);
+        //if(buffer.size()<20)
+        buffer.push_back(aaa);
+        if (buffer.size() > 32) {
+            buffer.pop_front();
+        }
+        //if (buff_ == NULL) {
+        //vec.clear();
+            //std::list<uint8_t> aaaa(data, data+size);
+            //aaaa.insert(aaaa.end(), aaaa.begin(), aaaa.end());
+        //}
+        //printf("p\n");
+        //return;
+        //if (iii % 60 != 0) {
+            //return;
+        //}
+        //printf("%d,%d\n", vec.size(), aaa.size());
+        //return;
+        //return;
+        /*if (stream_index == 0) {
             fwrite(data, sizeof(uint8_t), size, file1_);
         }
         if (stream_index == 1) {
             fwrite(data, sizeof(uint8_t), size, file2_);
-        }
-        //boost::python::numpy::from_data(data, sizeof(uint8_t), size);
+        }*/
     }
     void OnGyroData(const std::vector<ins_camera::GyroData>& data) override {
 
@@ -52,6 +112,7 @@ public:
         //fprintf(file2_, "timestamp:%lld shutter_speed_s:%f\n", data.timestamp, data.exposure_time);
     }
 
+
 private:
     FILE* file1_;
     FILE* file2_;
@@ -65,10 +126,250 @@ public:
     /**
      * \brief see also DeviceDiscovery to get DeviceConnectionInfo.
      */
+    std::shared_ptr<TestStreamDelegate> streamDelegate = std::make_shared<TestStreamDelegate>();
     _Camera(const ins_camera::DeviceConnectionInfo& info)
         :impl(std::make_shared<ins_camera::Camera>(info)) {
-        std::shared_ptr<ins_camera::StreamDelegate> streamDelegate = std::make_shared<TestStreamDelegate>();
-        SetStreamDelegate(streamDelegate);
+        auto p = std::dynamic_pointer_cast<ins_camera::StreamDelegate>(streamDelegate);
+        SetStreamDelegate(p);
+        //auto array_ = boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+    }
+    _Camera(const int cameraIdx)
+        :impl(std::make_shared<ins_camera::Camera>(
+            ins_camera::DeviceDiscovery().GetAvailableDevices()[cameraIdx].info)) {
+        //std::shared_ptr<ins_camera::StreamDelegate> streamDelegate = std::make_shared<TestStreamDelegate>();
+        auto p = std::dynamic_pointer_cast<ins_camera::StreamDelegate>(streamDelegate);
+        SetStreamDelegate(p);
+    }
+    boost::python::numpy::ndarray Read() {
+        // Allocate a AVContext
+        AVFormatContext* formatContext = avformat_alloc_context();
+        int bufsize = std::accumulate(buffer.begin(), buffer.end(), 0, [](int acc, auto i) {return acc + i.size(); });
+        // Alloc a buffer for the stream
+        unsigned char* fileStreamBuffer = (unsigned char*)av_malloc(100 * bufsize * sizeof(uint8_t));
+        flag = true;
+        AVIOContext* ioContext = avio_alloc_context(
+            fileStreamBuffer,
+            bufsize,
+            0,
+            NULL,
+            &a,
+            NULL,
+            NULL
+        );
+        if (ioContext == NULL) {
+            printf("avcio_alloc_context failed\n");
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //vec.clear();
+
+        // Set up the Format Context
+        formatContext->pb = ioContext;
+        formatContext->flags |= AVFMT_FLAG_CUSTOM_IO; // we set up our own IO
+
+        if (avformat_open_input(&formatContext, "", nullptr, nullptr) < 0) {
+            // Error opening file
+            //ここでエラー
+            printf("avformat_open_input failed\n");
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+
+        //av_free(ioContext);
+        //printf("abc");
+        // get stream info
+        if (avformat_find_stream_info(formatContext, nullptr) < 0) {
+            printf("avformat_find_stream_info failed\n");
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+
+        //return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+
+        //printf("def");
+        AVStream* videoStream = nullptr;
+        for (int i = 0; i < (int)formatContext->nb_streams; ++i) {
+            if (formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                videoStream = formatContext->streams[i];
+                break;
+            }
+        }
+        if (videoStream == nullptr) {
+            printf("No video stream ...\n");
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //printf("efg");
+        // find decoder
+        const AVCodec* codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
+        if (codec == nullptr) {
+            printf("No supported decoder ...\n");
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //printf("fgh");
+        // alloc codec context
+        AVCodecContext* codecContext = avcodec_alloc_context3(codec);
+        if (codecContext == nullptr) {
+            printf("avcodec_alloc_context3 failed\n");
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //printf("ghi");
+        // open codec
+        if (avcodec_parameters_to_context(codecContext, videoStream->codecpar) < 0) {
+            printf("avcodec_parameters_to_context failed\n");
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //printf("hij");
+        if (avcodec_open2(codecContext, codec, nullptr) != 0) {
+            printf("avcodec_open2 failed\n");
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //printf("ijk");
+        // decode frames
+        AVFrame* frame = av_frame_alloc();
+        AVFrame* frameRGBA = nullptr;
+        AVPacket packet = AVPacket();
+        struct SwsContext* swsContext = sws_getContext
+        (
+            codecContext->width,
+            codecContext->height,
+            codecContext->pix_fmt,
+            codecContext->width,
+            codecContext->height,
+            AV_PIX_FMT_BGRA,
+            0,
+            NULL,
+            NULL,
+            NULL
+        );
+        if (swsContext == nullptr) {
+            printf("sws context failed\n");
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+
+        }
+        //return//
+        while (av_read_frame(formatContext, &packet) == 0) {
+            //return array_;
+            if (packet.stream_index == videoStream->index) {
+
+                if (avcodec_send_packet(codecContext, &packet) != 0) {
+                    //printf("avcodec_send_packet failed\n");
+                    //printf("avcodec_send_packet failed\n");
+                    continue;
+                }
+                //printf("jkl");
+                //continue;
+                while (avcodec_receive_frame(codecContext, frame) == 0) {
+                    if (frameRGBA == nullptr) {
+                        frameRGBA = av_frame_alloc();
+                    }
+                    //on_frame_decoded(frame);
+                    //get the scaling context
+                    //printf("klm");
+                    // Convert the image from its native format to RGBA
+                    frameRGBA->height = frame->height;
+                    frameRGBA->width = frame->width;
+                    frameRGBA->format = AV_PIX_FMT_RGBA;
+                    if (av_image_alloc(frameRGBA->data, frameRGBA->linesize, frame->width, frame->height, AV_PIX_FMT_BGRA, 32) < 0) {
+                        printf("image alloc error");
+                        continue;
+                    }
+                    sws_scale
+                    (
+                        swsContext,
+                        (uint8_t const* const*)frame->data,
+                        frame->linesize,
+                        0,
+                        frame->height,
+                        frameRGBA->data,
+                        frameRGBA->linesize
+                    );
+                }
+            }
+            av_packet_unref(&packet);
+        }
+
+        //return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        if (frameRGBA == nullptr) {
+
+            printf("get frame failed");
+
+            sws_freeContext(swsContext);
+            av_frame_free(&frame);
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        auto size___ = av_image_get_buffer_size(AV_PIX_FMT_RGBA, frameRGBA->width, frameRGBA->height, 1);
+        if (size___ < 0) {
+            printf("av_image_get_buffer_size failed");
+
+            sws_freeContext(swsContext);
+            av_frame_free(&frame);
+            av_frame_free(&frameRGBA);
+            avcodec_free_context(&codecContext);
+            avformat_close_input(&formatContext);
+            av_free(ioContext);
+            free(fileStreamBuffer);
+            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        }
+        //Release
+        uint8_t* pt = (uint8_t*)malloc(size___);
+        //int8_t ppt[1280 * 1280 * 4];
+        av_image_copy_to_buffer((uint8_t*)pt, size___, frameRGBA->data, frameRGBA->linesize, AV_PIX_FMT_RGBA, frameRGBA->width, frameRGBA->height, 1);
+        //memcpy(pt, frame->data[AV_NUM_DATA_POINTERS], frame->linesize[AV_NUM_DATA_POINTERS]);
+        auto array_ = boost::python::numpy::zeros(boost::python::make_tuple((frameRGBA->width * frameRGBA->height * 4)), boost::python::numpy::dtype::get_builtin<int>());
+        //memcpy(array_.get_data(), pt, frameRGBA->width * frameRGBA->height * 4);
+        for (int i = 0; i < frameRGBA->width * frameRGBA->height * 4; ++i) {
+            array_[i] = pt[i];
+        }
+        //array_ = boost::python::numpy::from_data((void*)pt, boost::python::numpy::dtype::get_builtin<uint8_t>(), boost::python::make_tuple((frameRGBA->width)), boost::python::make_tuple((sizeof(uint8_t))), boost::python::object());
+
+        //array_ = boost::python::numpy::zeros(boost::python::make_tuple((1, 2)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        printf("%d,%d,%d\n", frameRGBA->height, frameRGBA->width, frameRGBA->channels);
+        printf("grok%d,%d,%d\n", frame->height, frame->width, frame->channels);
+        printf("grok%d,%d,%d\n", codecContext->height, codecContext->width, codecContext->channels);
+        free(pt);
+
+        sws_freeContext(swsContext);
+        av_frame_free(&frame);
+        av_frame_free(&frameRGBA);
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        av_free(ioContext);
+        free(fileStreamBuffer);
+        //array_.reshape(boost::python::tuple((frameRGBA->height, frameRGBA->width, 4))); 
+
+        return array_;
+    }
+    void SetCallback(boost::function<void(boost::python::numpy::ndarray)> callback) {
+
     }
     /**
      * \brief Open camera and start session
@@ -171,7 +472,7 @@ public:
      * \brief set capture settings, the settings will only be applied to specified mode
      * \param mode the target mode you want to apply exposure settings, for normal video recording,
      *      use CameraFunctionMode::FUNCTION_MODE_NORMAL_VIDEO, for normal still image capture,
-     *      use CaperaFunctionMode::FUNCTION_MODE_NORMAL_IMAGE.
+     *      use CaperaFunctionMode::FUNCTION_MODE_NORMAL_IMAGE. 
      * \param settings CaptureSettings containing capture settings like saturation,contrast,whitebalance,sharpness,brightness and etc.
      * \return true on success, false otherwise.
      */
@@ -292,11 +593,38 @@ private:
     const std::shared_ptr<ins_camera::Camera> impl;
 };
 
+// https://stackoverflow.com/questions/36049533/sending-python-function-as-boost-function-argument
+struct BoostFunc_from_Python_Callable
+{
+    BoostFunc_from_Python_Callable()
+    {
+        boost::python::converter::registry::push_back(&convertible, &construct, boost::python::type_id< boost::function< void(boost::python::numpy::ndarray) > >());
+    }
+
+    static void* convertible(PyObject* obj_ptr)
+    {
+        if (!PyCallable_Check(obj_ptr))
+            return 0;
+        return obj_ptr;
+    }
+
+    static void construct(PyObject* obj_ptr, boost::python::converter::rvalue_from_python_stage1_data* data)
+    {
+        boost::python::object callable(boost::python::handle<>(boost::python::borrowed(obj_ptr)));
+        void* storage = ((boost::python::converter::rvalue_from_python_storage< boost::function< void(boost::python::numpy::ndarray) > >*) data)->storage.bytes;
+        new (storage)boost::function< void(boost::python::numpy::ndarray) >(callable);
+        data->convertible = storage;
+    }
+};
+
 BOOST_PYTHON_MODULE(insta360_sdk_python)
 {
     using namespace boost::python;
     Py_Initialize();
-    //numpy::initialize();
+    numpy::initialize();
+
+    // Register function converter
+    BoostFunc_from_Python_Callable();
 
 
     //ins_types.h
@@ -351,6 +679,7 @@ BOOST_PYTHON_MODULE(insta360_sdk_python)
 
     //camera.h
     class_<_Camera>("Camera", init<ins_camera::DeviceConnectionInfo>())
+        .def("read", &_Camera::Read)
         .def("open", &_Camera::Open)
         .def("close", &_Camera::Close)
         .def("get_serial_number", &_Camera::GetSerialNumber)
@@ -378,7 +707,8 @@ BOOST_PYTHON_MODULE(insta360_sdk_python)
         .def("start_timelapse", &_Camera::StartTimeLapse)
         .def("stop_timelapse", &_Camera::StopTimeLapse)
         .def("sync_local_time_to_camera", &_Camera::SyncLocalTimeToCamera)
-        .def("get_http_base_url", &_Camera::GetHttpBaseUrl);
+        .def("get_http_base_url", &_Camera::GetHttpBaseUrl)
+        .def("set_callback", &_Camera::SetCallback);
 
 
     //photography_settings.h

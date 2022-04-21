@@ -20,6 +20,11 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/video/video.hpp>
 #include <numeric>
+#include <stitcher/common.h>
+#include <stitcher/stitcher.h>
+#include <stitcher/version.h>
+#include <thread>
+#include <chrono>
 extern "C" {
     #include <libavutil/imgutils.h>
     #include <libavcodec/avcodec.h>
@@ -27,12 +32,13 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libavutil/pixfmt.h>
 #include <stdio.h>
+#include <libavfilter/avfilter.h>
 }
 
 std::list<std::vector<uint8_t>> buffer;
 bool flag = false;
 int a(void* ptr, uint8_t* buf, int buf_size) {
-    if (buffer.size()<32||flag==false) {
+    if (buffer.size()<16||flag==false||buf_size<=0) {
         //printf("aaa");
         return AVERROR_EOF;
     }
@@ -42,7 +48,7 @@ int a(void* ptr, uint8_t* buf, int buf_size) {
             std::vector<uint8_t> bufBuffer = b;
             memcpy(buf+cur, bufBuffer.data(), bufBuffer.size() * sizeof(uint8_t));
             cur += bufBuffer.size();
-            //printf("b%d\n", bufBuffer.size());
+            printf("b%d\n", bufBuffer.size());
         }
         buffer.erase(buffer.begin(),std::next(buffer.begin(),1));
         flag = false;
@@ -76,7 +82,7 @@ public:
         std::vector<uint8_t> aaa(data, data + size);
         //if(buffer.size()<20)
         buffer.push_back(aaa);
-        if (buffer.size() > 32) {
+        if (buffer.size() > 16) {
             buffer.pop_front();
         }
         //if (buff_ == NULL) {
@@ -140,12 +146,16 @@ public:
         auto p = std::dynamic_pointer_cast<ins_camera::StreamDelegate>(streamDelegate);
         SetStreamDelegate(p);
     }
-    boost::python::numpy::ndarray Read() {
+    //boost::python::numpy::ndarray 
+    void Read() {
+
         // Allocate a AVContext
         AVFormatContext* formatContext = avformat_alloc_context();
-        int bufsize = std::accumulate(buffer.begin(), buffer.end(), 0, [](int acc, auto i) {return acc + i.size(); });
+        int bufsize = std::accumulate(buffer.begin(), buffer.end(), 0, [](int acc, auto i) {
+            return acc + i.size();
+            });
         // Alloc a buffer for the stream
-        unsigned char* fileStreamBuffer = (unsigned char*)av_malloc(100 * bufsize * sizeof(uint8_t));
+        unsigned char* fileStreamBuffer = (unsigned char*)av_malloc(2*bufsize * sizeof(uint8_t));
         flag = true;
         AVIOContext* ioContext = avio_alloc_context(
             fileStreamBuffer,
@@ -158,7 +168,7 @@ public:
         );
         if (ioContext == NULL) {
             printf("avcio_alloc_context failed\n");
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
         //vec.clear();
 
@@ -167,24 +177,20 @@ public:
         formatContext->flags |= AVFMT_FLAG_CUSTOM_IO; // we set up our own IO
 
         if (avformat_open_input(&formatContext, "", nullptr, nullptr) < 0) {
-            // Error opening file
-            //ここでエラー
-            printf("avformat_open_input failed\n");
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            printf("avformat_open_input failed\n");
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
-
         //av_free(ioContext);
         //printf("abc");
         // get stream info
         if (avformat_find_stream_info(formatContext, nullptr) < 0) {
             printf("avformat_find_stream_info failed\n");
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
 
         //return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
@@ -200,9 +206,9 @@ public:
         if (videoStream == nullptr) {
             printf("No video stream ...\n");
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
         //printf("efg");
         // find decoder
@@ -210,9 +216,9 @@ public:
         if (codec == nullptr) {
             printf("No supported decoder ...\n");
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
         //printf("fgh");
         // alloc codec context
@@ -221,9 +227,9 @@ public:
             printf("avcodec_alloc_context3 failed\n");
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
         //printf("ghi");
         // open codec
@@ -231,24 +237,25 @@ public:
             printf("avcodec_parameters_to_context failed\n");
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
         //printf("hij");
         if (avcodec_open2(codecContext, codec, nullptr) != 0) {
             printf("avcodec_open2 failed\n");
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
+
         //printf("ijk");
         // decode frames
         AVFrame* frame = av_frame_alloc();
         AVFrame* frameRGBA = nullptr;
-        AVPacket packet = AVPacket();
+        AVPacket* packet = av_packet_alloc();
         struct SwsContext* swsContext = sws_getContext
         (
             codecContext->width,
@@ -266,20 +273,19 @@ public:
             printf("sws context failed\n");
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
 
         }
         //return//
-        while (av_read_frame(formatContext, &packet) == 0) {
+        while (av_read_frame(formatContext, packet) == 0) {
             //return array_;
-            if (packet.stream_index == videoStream->index) {
-
-                if (avcodec_send_packet(codecContext, &packet) != 0) {
+            if (packet->stream_index == videoStream->index) {
+                if (avcodec_send_packet(codecContext, packet) != 0) {
                     //printf("avcodec_send_packet failed\n");
                     //printf("avcodec_send_packet failed\n");
-                    continue;
+                    //continue;
                 }
                 //printf("jkl");
                 //continue;
@@ -294,10 +300,15 @@ public:
                     frameRGBA->height = frame->height;
                     frameRGBA->width = frame->width;
                     frameRGBA->format = AV_PIX_FMT_RGBA;
+                    if (frameRGBA->data != nullptr) {
+                        av_freep(&frameRGBA->data);
+                    }
                     if (av_image_alloc(frameRGBA->data, frameRGBA->linesize, frame->width, frame->height, AV_PIX_FMT_BGRA, 32) < 0) {
                         printf("image alloc error");
                         continue;
                     }
+
+
                     sws_scale
                     (
                         swsContext,
@@ -310,35 +321,40 @@ public:
                     );
                 }
             }
-            av_packet_unref(&packet);
+            av_packet_unref(packet);
         }
-
+        av_packet_free(&packet);
         //return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         if (frameRGBA == nullptr) {
 
             printf("get frame failed");
 
             sws_freeContext(swsContext);
+            av_freep(&frame->data);
             av_frame_free(&frame);
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
+
         auto size___ = av_image_get_buffer_size(AV_PIX_FMT_RGBA, frameRGBA->width, frameRGBA->height, 1);
         if (size___ < 0) {
             printf("av_image_get_buffer_size failed");
 
             sws_freeContext(swsContext);
+            av_freep(&frame->data);
             av_frame_free(&frame);
+            av_freep(&frameRGBA->data);
             av_frame_free(&frameRGBA);
             avcodec_free_context(&codecContext);
             avformat_close_input(&formatContext);
-            av_free(ioContext);
-            free(fileStreamBuffer);
-            return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+            av_free(ioContext->buffer);
+            //av_free(fileStreamBuffer);
+            return; boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
         }
+
         //Release
         uint8_t* pt = (uint8_t*)malloc(size___);
         //int8_t ppt[1280 * 1280 * 4];
@@ -352,21 +368,23 @@ public:
         //array_ = boost::python::numpy::from_data((void*)pt, boost::python::numpy::dtype::get_builtin<uint8_t>(), boost::python::make_tuple((frameRGBA->width)), boost::python::make_tuple((sizeof(uint8_t))), boost::python::object());
 
         //array_ = boost::python::numpy::zeros(boost::python::make_tuple((1, 2)), boost::python::numpy::dtype::get_builtin<uint8_t>());
-        printf("%d,%d,%d\n", frameRGBA->height, frameRGBA->width, frameRGBA->channels);
-        printf("grok%d,%d,%d\n", frame->height, frame->width, frame->channels);
-        printf("grok%d,%d,%d\n", codecContext->height, codecContext->width, codecContext->channels);
+        //printf("%d,%d,%d\n", frameRGBA->height, frameRGBA->width, frameRGBA->channels);
+       // printf("grok%d,%d,%d\n", frame->height, frame->width, frame->channels);
+        //printf("grok%d,%d,%d\n", codecContext->height, codecContext->width, codecContext->channels);
         free(pt);
 
         sws_freeContext(swsContext);
+        av_freep(&frame->data);
+        av_freep(&frameRGBA->data);
         av_frame_free(&frame);
         av_frame_free(&frameRGBA);
         avcodec_free_context(&codecContext);
         avformat_close_input(&formatContext);
-        av_free(ioContext);
-        free(fileStreamBuffer);
+        av_free(ioContext->buffer);
+        //av_free(fileStreamBuffer);
         //array_.reshape(boost::python::tuple((frameRGBA->height, frameRGBA->width, 4))); 
-
-        return array_;
+        //return boost::python::numpy::zeros(boost::python::make_tuple((1, 1)), boost::python::numpy::dtype::get_builtin<uint8_t>());
+        return; array_;
     }
     void SetCallback(boost::function<void(boost::python::numpy::ndarray)> callback) {
 
@@ -898,17 +916,65 @@ BOOST_PYTHON_MODULE(insta360_sdk_python)
         .add_property("lapse_time", &ins_camera::TimelapseParam::lapseTime)
         .add_property("accelerate_fequency", &ins_camera::TimelapseParam::accelerate_fequency);
 
+    //statcher.h
+    class_<ins_media::VideoStitcher>("VideoStitcher")
+        .def("SetInputPath", &ins_media::VideoStitcher::SetInputPath)
+        .def("SetCudaDeviceNo", &ins_media::VideoStitcher::SetCudaDeviceNo)
+        .def("GetCudaDeviceNum", &ins_media::VideoStitcher::GetCudaDeviceNum)
+        .def("EnableCuda", &ins_media::VideoStitcher::EnableCuda)
+        .def("SetOutputBitRate", &ins_media::VideoStitcher::SetOutputBitRate)
+        .def("SetOutputSize", &ins_media::VideoStitcher::SetOutputSize)
+        .def("EnableFlowState", &ins_media::VideoStitcher::EnableFlowState)
+        .def("SetStitchType", &ins_media::VideoStitcher::SetStitchType)
+        .def("SetStitchProgressCallback", &ins_media::VideoStitcher::SetStitchProgressCallback)
+        .def("StartStitch", &ins_media::VideoStitcher::StartStitch)
+        .def("CancelStitch", &ins_media::VideoStitcher::CancelStitch)
+        .def("GetStitchProgress", &ins_media::VideoStitcher::GetStitchProgress);
+    class_<ins_media::ImageStitcher>("ImageStitcher")
+        .def("SetInputPath", &ins_media::ImageStitcher::SetInputPath)
+        .def("SetOutputPath", &ins_media::ImageStitcher::SetOutputPath)
+        .def("SetOutputSize", &ins_media::ImageStitcher::SetOutputSize)
+        .def("SetHDRType", &ins_media::ImageStitcher::SetHDRType)
+        .def("EnableFlowState", &ins_media::ImageStitcher::EnableFlowState)
+        .def("SetStitchType", &ins_media::ImageStitcher::SetStitchType)
+        .def("Stitch", &ins_media::ImageStitcher::Stitch);
+    enum_<STITCH_ERR>("STITCH_ERR")
+        .value("NoMetaData", STITCH_ERR::NoMetaData)
+        .value("NoSupportedFormat", STITCH_ERR::NoSupportedFormat)
+        .value("InitPipelineFailed", STITCH_ERR::InitPipelineFailed)
+        .value("FlowStateInitFailed", STITCH_ERR::FlowStateInitFailed)
+        .value("BlenderInitFailed", STITCH_ERR::BlenderInitFailed)
+        .value("BlenderError", STITCH_ERR::BlendError)
+        .value("InvalidParam", STITCH_ERR::InvaildParam)
+        .value("NoError", STITCH_ERR::NoError);
+    enum_<HDR_TYPE>("HDR_TYPE")
+        .value("HDR_TYPE", HDR_TYPE::ImageHdr_NONE)
+        .value("SingleImageHdr", HDR_TYPE::SingleImageHdr)
+        .value("MultiImageHDR_mbb", HDR_TYPE::MultiImageHdr_mbb)
+        .value("MultiImageHDR_mpl", HDR_TYPE::MultiImageHdr_mpl);
+    enum_<STITCH_TYPE>("STITCH_TYPE")
+        .value("TEMPLATE", STITCH_TYPE::TEMPLATE)
+        .value("OPTFLOW", STITCH_TYPE::OPTFLOW)
+        .value("DYNAMICSTITCH", STITCH_TYPE::DYNAMICSTITCH);
     class_<TestStreamDelegate>("TestStreamDelegate");
     
 
 }
-// プログラムの実行: Ctrl + F5 または [デバッグ] > [デバッグなしで開始] メニュー
-// プログラムのデバッグ: F5 または [デバッグ] > [デバッグの開始] メニュー
-
-// 作業を開始するためのヒント: 
-//    1. ソリューション エクスプローラー ウィンドウを使用してファイルを追加/管理します 
-//   2. チーム エクスプローラー ウィンドウを使用してソース管理に接続します
-//   3. 出力ウィンドウを使用して、ビルド出力とその他のメッセージを表示します
-//   4. エラー一覧ウィンドウを使用してエラーを表示します
-//   5. [プロジェクト] > [新しい項目の追加] と移動して新しいコード ファイルを作成するか、[プロジェクト] > [既存の項目の追加] と移動して既存のコード ファイルをプロジェクトに追加します
-//   6. 後ほどこのプロジェクトを再び開く場合、[ファイル] > [開く] > [プロジェクト] と移動して .sln ファイルを選択します
+int main() {
+    using namespace boost::python;
+    Py_Initialize();
+    numpy::initialize();
+    
+    auto d = ins_camera::DeviceDiscovery().GetAvailableDevices();
+    auto c = _Camera(d[0].info);
+    c.Open();
+    using namespace std::chrono_literals;
+    std::this_thread::sleep_for(3000ms);
+    c.StartLiveStreaming(ins_camera::LiveStreamParam());
+    std::this_thread::sleep_for(1000ms);
+    while (true) {
+        c.Read();
+        printf("gr");
+    }
+    return 0;
+}
